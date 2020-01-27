@@ -21,7 +21,8 @@ def generate_bins(bins):
 
     return angle_bins
 
-class Dataset(data.Dataset):
+
+class KittiDataset(data.Dataset):
     def __init__(self, path, bins=2, overlap=0.1):
 
         self.top_label_path = path + "/label_2/"

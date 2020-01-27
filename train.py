@@ -1,6 +1,5 @@
-from torch_lib.Dataset import *
+from torch_lib.Dataset import KittiDataset
 from torch_lib.Model import Model, OrientationLoss
-
 
 import torch
 import torch.nn as nn
@@ -8,34 +7,35 @@ from torch.autograd import Variable
 from torchvision.models import vgg
 from torch.utils import data
 
-
 import os
+import argparse
 
-def main():
-
+def main(opt):
     # hyper parameters
-    epochs = 100
-    batch_size = 8
-    alpha = 0.6
-    w = 0.4
+    epochs = opt.epochs
+    batch_size = opt.batch_size
+    alpha = opt.alpha
+    beta  = opt.beta
+    lr    = opt.lr
 
     print("Loading all detected objects in dataset...")
+    dataset = KittiDataset(opt.kitti_root)
 
-    train_path = os.path.abspath(os.path.dirname(__file__)) + '/Kitti/training'
-    dataset = Dataset(train_path)
-
-    params = {'batch_size': batch_size,
-              'shuffle': True,
-              'num_workers': 6}
+    params = {
+        'batch_size': opt.batch_size,
+        'shuffle': True,
+        'num_workers': 6
+    }
 
     generator = data.DataLoader(dataset, **params)
 
-    my_vgg = vgg.vgg19_bn(pretrained=True)
-    model = Model(features=my_vgg.features).cuda()
-    opt_SGD = torch.optim.SGD(model.parameters(), lr=0.0001, momentum=0.9)
-    conf_loss_func = nn.CrossEntropyLoss().cuda()
-    dim_loss_func = nn.MSELoss().cuda()
-    orient_loss_func = OrientationLoss
+    my_vgg   = vgg.vgg19_bn(pretrained=True)
+    model    = Model(features=my_vgg.features).cuda()
+    opt_SGD  = torch.optim.SGD(model.parameters(), lr=opt.lr, momentum=opt.momentum)
+
+    conf_loss_func    = nn.CrossEntropyLoss().cuda()
+    dim_loss_func     = nn.MSELoss().cuda()
+    orient_loss_func  = OrientationLoss
 
     # load any previous weights
     model_path = os.path.abspath(os.path.dirname(__file__)) + '/weights/'
@@ -49,7 +49,6 @@ def main():
         except:
             pass
 
-
     if latest_model is not None:
         checkpoint = torch.load(model_path + latest_model)
         model.load_state_dict(checkpoint['model_state_dict'])
@@ -61,37 +60,45 @@ def main():
         print('Resuming training....')
 
 
-
     total_num_batches = int(len(dataset) / batch_size)
 
+    print(f'Training for {epochs} epochs ...')
+    
     for epoch in range(first_epoch+1, epochs+1):
+        """
+        Training Loop Here.
+        """
         curr_batch = 0
         passes = 0
+
         for local_batch, local_labels in generator:
 
             truth_orient = local_labels['Orientation'].float().cuda()
-            truth_conf = local_labels['Confidence'].long().cuda()
-            truth_dim = local_labels['Dimensions'].float().cuda()
+            truth_conf   = local_labels['Confidence'].long().cuda()
+            truth_dim    = local_labels['Dimensions'].float().cuda()
 
-            local_batch=local_batch.float().cuda()
+            local_batch  = local_batch.float().cuda()
+
             [orient, conf, dim] = model(local_batch)
 
             orient_loss = orient_loss_func(orient, truth_orient, truth_conf)
-            dim_loss = dim_loss_func(dim, truth_dim)
+            dim_loss    = dim_loss_func(dim, truth_dim)
 
-            truth_conf = torch.max(truth_conf, dim=1)[1]
-            conf_loss = conf_loss_func(conf, truth_conf)
+            truth_conf  = torch.max(truth_conf, dim=1)[1]
+            conf_loss   = conf_loss_func(conf, truth_conf)
 
-            loss_theta = conf_loss + w * orient_loss
+            loss_theta  = conf_loss + beta * orient_loss
+
+            # Total Loss
             loss = alpha * dim_loss + loss_theta
 
             opt_SGD.zero_grad()
             loss.backward()
             opt_SGD.step()
 
-
-            if passes % 10 == 0:
-                print("--- epoch %s | batch %s/%s --- [loss: %s]" %(epoch, curr_batch, total_num_batches, loss.item()))
+            if passes % 100 == 0:
+                print("epoch [%s]: Batch [%s/%s] --- [total loss: %s, confidence: %s, orientation: %s, dimension: %s]" \
+                     %(epoch, curr_batch, total_num_batches, loss.item(), conf_loss.item(), orient_loss.item(), dim_loss.item()))
                 passes = 0
 
             passes += 1
@@ -112,4 +119,16 @@ def main():
             print("====================")
 
 if __name__=='__main__':
-    main()
+    parser = argparse.ArgumentParser(description='Training Info ...')
+    parser.add_argument('--epochs', type=int, default=50, help='number of epochs')
+    parser.add_argument('--kitti_root', default = '/kitti/object/training/', help='root for kitti dataset')
+    parser.add_argument('--batch_size', type=int, default=8, help='batch size')
+    parser.add_argument('--alpha', type=float, default=0.6, help='weight for dimension loss')
+    parser.add_argument('--beta', type=float, default=0.4, help='weight for orientation loss')
+    parser.add_argument('--lr', type=float, default=0.0001, help='learning rate')
+    parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
+
+    opt = parser.parse_args()
+    
+    main(opt)
+
